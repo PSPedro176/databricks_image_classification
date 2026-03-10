@@ -1,0 +1,39 @@
+bundle:
+  name: image-recommendation
+
+workspace:
+  root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+resources:
+  jobs:
+    image_recommendation_pipeline:
+      name: "Image Recommendation Pipeline"
+      tasks:
+        - task_key: data_preparation
+          existing_cluster_id: "0309-174733-hzoid440"
+          notebook_task:
+            notebook_path: ./01_data_preparation.py
+            source: WORKSPACE
+
+        - task_key: model_training_and_deployment
+          depends_on:
+            - task_key: data_preparation
+          existing_cluster_id: "0309-174733-hzoid440"
+          notebook_task:
+            notebook_path: ./02_model_training_and_deployment.py
+            source: WORKSPACE
+
+        - task_key: test_inference
+          depends_on:
+            - task_key: model_training_and_deployment
+          existing_cluster_id: "0309-174733-hzoid440"
+          notebook_task:
+            notebook_path: ./03_test_inference.py
+            source: WORKSPACE
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      profile: image-rec-classic
