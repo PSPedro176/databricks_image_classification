@@ -3,8 +3,10 @@
 # MAGIC # Image Recommendation System — Model Training & Deployment
 # MAGIC
 # MAGIC This notebook reads the Fashion MNIST Delta tables created in **01_data_preparation**,
-# MAGIC trains a similarity model on a single GPU, registers it to Unity Catalog,
-# MAGIC and deploys a Model Serving endpoint.
+# MAGIC trains a similarity model on a single GPU, computes embeddings for all training
+# MAGIC images, populates the feature table (created in **02_feature_table_setup**),
+# MAGIC syncs the Vector Search index, registers the model to Unity Catalog, and deploys
+# MAGIC a Model Serving endpoint.
 
 # COMMAND ----------
 
@@ -13,7 +15,8 @@
 # MAGIC
 # MAGIC 1. **Setup** — Install libraries, imports, configure Unity Catalog
 # MAGIC 2. **Single-GPU Training** — Train a similarity model on one GPU
-# MAGIC 3. **Deployment** — Register to UC and create a Model Serving endpoint
+# MAGIC 3. **Embeddings** — Compute & write embeddings to feature table, sync VS index
+# MAGIC 4. **Deployment** — Register to UC and create a Model Serving endpoint
 
 # COMMAND ----------
 
@@ -69,11 +72,13 @@ schema = "image_recommendation"
 volume = "data"
 volume_path = f"/Volumes/{catalog}/{schema}/{volume}"
 model_name = f"{catalog}.{schema}.image_recommender"
+feature_table_name = f"{catalog}.{schema}.image_embeddings"
 
 print(f"Using catalog: {catalog}")
 print(f"Using schema: {catalog}.{schema}")
 print(f"Volume path: {volume_path}")
 print(f"Model name: {model_name}")
+print(f"Feature table: {feature_table_name}")
 
 # COMMAND ----------
 
@@ -206,10 +211,6 @@ def train_model(
 
 # COMMAND ----------
 
-model = train_model(train, test, learning_rate=0.001)
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## Train the Final Model
 # MAGIC
@@ -312,56 +313,87 @@ for idx in np.argsort(y_display):
 
 import shutil
 
-tfsim_path = "/databricks/driver/models/tfsim.pth"
-if os.path.exists(tfsim_path):
-    shutil.rmtree(tfsim_path)
-tfsim_model.save(tfsim_path)
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Compute Embeddings & Populate Feature Table
 
 # COMMAND ----------
 
-# Save ID-to-pixel lookup for the serving wrapper
-all_ids = train_pdf["image_id"].values.astype(np.int64)
-all_pixels = train_pdf.drop(columns=["image_id", "label"]).values.reshape(-1, 28, 28).astype(np.uint8)
-id_to_pixels_path = "/databricks/driver/models/id_to_pixels.npz"
-np.savez_compressed(id_to_pixels_path, image_ids=all_ids, pixels=all_pixels)
+embeddings = tfsim_model.predict(x_train)  # shape: (N, 256)
+print(f"Computed {embeddings.shape[0]} embeddings of dim {embeddings.shape[1]}")
 
-artifacts = {"tfsim_model": tfsim_path, "id_to_pixels": id_to_pixels_path}
+# COMMAND ----------
+
+from pyspark.sql.types import (
+    StructType, StructField, IntegerType, ArrayType, FloatType,
+)
+
+rows = [
+    (int(id_train[i]), embeddings[i].tolist())
+    for i in range(len(id_train))
+]
+emb_schema = StructType([
+    StructField("image_id", IntegerType(), False),
+    StructField("embedding", ArrayType(FloatType()), False),
+])
+embeddings_df = spark.createDataFrame(rows, schema=emb_schema)
+embeddings_df.write.mode("overwrite").saveAsTable(feature_table_name)
+print(f"Wrote {len(rows)} embeddings to {feature_table_name}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Trigger Vector Search index sync
+
+# COMMAND ----------
+
+from databricks.vector_search.client import VectorSearchClient
+
+vs_client = VectorSearchClient()
+vs_index = vs_client.get_index(
+    endpoint_name="image-recommender-vs",
+    index_name=f"{catalog}.{schema}.image_embeddings_index",
+)
+vs_index.sync()
+print("Vector Search index sync triggered.")
 
 # COMMAND ----------
 
 class TfsimWrapper(mlflow.pyfunc.PythonModel):
-    """Pyfunc wrapper: accepts an image_id, returns 5 recommended image_ids."""
+    """Pyfunc wrapper: looks up embedding via Vector Search,
+    then finds 5 nearest neighbors."""
 
     def load_context(self, context):
-        import os
-        os.environ["TF_USE_LEGACY_KERAS"] = "1"
-        import tf_keras
-        from tensorflow_similarity.losses import MultiSimilarityLoss
-        from tensorflow_similarity.layers import MetricEmbedding
-        from tensorflow_similarity.models import SimilarityModel
-
-        self.tfsim_model = tf_keras.models.load_model(
-            context.artifacts["tfsim_model"],
-            custom_objects={
-                "MultiSimilarityLoss": MultiSimilarityLoss,
-                "MetricEmbedding": MetricEmbedding,
-                "SimilarityModel": SimilarityModel,
-            },
+        from databricks.vector_search.client import VectorSearchClient
+        self._index = VectorSearchClient().get_index(
+            endpoint_name=self.vs_endpoint_name,
+            index_name=self.vs_index_name,
         )
-        self.tfsim_model.load_index(context.artifacts["tfsim_model"])
 
-        # Load ID-to-pixel mapping
-        data = np.load(context.artifacts["id_to_pixels"])
-        self.id_to_pixels = dict(zip(data["image_ids"].tolist(), data["pixels"]))
-
-    def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
+    def predict(self, context, model_input):
         image_id = int(model_input["image_id"].iloc[0])
-        pixels = self.id_to_pixels[image_id]  # (28, 28) uint8
-        image = pixels.astype("float32") / 255.0
-        image_reshaped = image.reshape(1, 28, 28)
 
-        results = self.tfsim_model.lookup(image_reshaped, k=5)
-        recommended_ids = [int(results[0][i].data) for i in range(5)]
+        # Step 1: Get embedding for this image_id
+        lookup = self._index.similarity_search(
+            query_vector=[0.0] * 256,
+            filters={"image_id": image_id},
+            columns=["embedding"],
+            num_results=1,
+        )
+        query_embedding = lookup["result"]["data_array"][0][0]
+
+        # Step 2: Find 5 nearest neighbors (exclude self)
+        results = self._index.similarity_search(
+            query_vector=query_embedding,
+            columns=["image_id"],
+            num_results=6,
+        )
+        recommended_ids = [
+            int(row[0]) for row in results["result"]["data_array"]
+            if int(row[0]) != image_id
+        ][:5]
+
         return pd.DataFrame({"recommended_image_id": recommended_ids})
 
 # COMMAND ----------
@@ -385,11 +417,8 @@ conda_env = {
         {
             "pip": [
                 "mlflow",
-                f"tensorflow_similarity=={tfsim.__version__}",
-                f"tensorflow_cpu=={tf.__version__}",
                 f"cloudpickle=={cloudpickle.__version__}",
-                "tf-keras",
-                "protobuf==3.20.3",
+                "databricks-vectorsearch",
             ],
         },
     ],
@@ -398,13 +427,16 @@ conda_env = {
 
 # COMMAND ----------
 
+wrapper = TfsimWrapper()
+wrapper.vs_endpoint_name = "image-recommender-vs"
+wrapper.vs_index_name = f"{catalog}.{schema}.image_embeddings_index"
+
 mlflow_pyfunc_model_path = "/databricks/driver/models/tfsim_mlflow.pth"
 if os.path.exists(mlflow_pyfunc_model_path):
     shutil.rmtree(mlflow_pyfunc_model_path)
 mlflow.pyfunc.save_model(
     path=mlflow_pyfunc_model_path,
-    python_model=TfsimWrapper(),
-    artifacts=artifacts,
+    python_model=wrapper,
     conda_env=conda_env,
 )
 
@@ -415,7 +447,8 @@ mlflow.pyfunc.save_model(
 
 # COMMAND ----------
 
-sample_input = pd.DataFrame({"image_id": [42]})
+sample_id = 42
+sample_input = pd.DataFrame({"image_id": [sample_id]})
 
 # COMMAND ----------
 
@@ -432,7 +465,9 @@ print(test_predictions)
 
 from mlflow.models.signature import infer_signature
 
-signature = infer_signature(sample_input, loaded_model.predict(sample_input))
+# Signature uses image_id only — Feature Serving adds the embedding
+sig_input = pd.DataFrame({"image_id": [sample_id]})
+signature = infer_signature(sig_input, test_predictions)
 
 # COMMAND ----------
 
@@ -441,18 +476,21 @@ signature = infer_signature(sample_input, loaded_model.predict(sample_input))
 
 # COMMAND ----------
 
+wrapper = TfsimWrapper()
+wrapper.vs_endpoint_name = "image-recommender-vs"
+wrapper.vs_index_name = f"{catalog}.{schema}.image_embeddings_index"
+
 with mlflow.start_run() as run:
     mlflow.pyfunc.log_model(
         artifact_path="tfsim",
-        python_model=TfsimWrapper(),
-        artifacts=artifacts,
+        python_model=wrapper,
         conda_env=conda_env,
         signature=signature,
-        registered_model_name=model_name,
+        input_example=sig_input.to_dict(orient="list"),
     )
+
     model_version = mlflow.register_model(
-        f"runs:/{run.info.run_id}/tfsim",
-        model_name,
+        f"runs:/{run.info.run_id}/tfsim", model_name
     )
     print(
         f"Model registered: {model_name}, version: {model_version.version}"

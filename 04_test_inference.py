@@ -8,21 +8,27 @@
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Setup
+# MAGIC %pip install databricks-vectorsearch
 
 # COMMAND ----------
 
-import os
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
+# MAGIC %md
+# MAGIC ## Setup
 
 # COMMAND ----------
 
 import numpy as np
 import pandas as pd
 import mlflow
+import requests
+import json
+from matplotlib import pyplot as plt
+from PIL import Image
+from mlflow.tracking import MlflowClient
 
 mlflow.set_registry_uri("databricks-uc")
+
+# COMMAND ----------
 
 catalog = "image_rec_classic_catalog"
 schema = "image_recommendation"
@@ -48,9 +54,6 @@ sample_input = pd.DataFrame({"image_id": [sample_image_id]})
 
 # COMMAND ----------
 
-from matplotlib import pyplot as plt
-from PIL import Image
-
 input_img = Image.open(f"/Volumes/{catalog}/{schema}/data/images/train/{sample_image_id}.png")
 
 plt.figure(figsize=(3, 3))
@@ -66,26 +69,14 @@ plt.show()
 
 # COMMAND ----------
 
-# MAGIC %pip install tensorflow_similarity protobuf==3.20.3 tf-keras
+# Use the latest model version (deployed by notebook 03)
+client = MlflowClient(registry_uri="databricks-uc")
+latest_version = max(
+    client.search_model_versions(f"name='{model_name}'"),
+    key=lambda v: int(v.version),
+).version
 
-# COMMAND ----------
-
-# Register custom objects globally so tf_keras can deserialize the saved model
-import tf_keras
-from tensorflow_similarity.losses import MultiSimilarityLoss
-from tensorflow_similarity.layers import MetricEmbedding
-from tensorflow_similarity.models import SimilarityModel
-
-tf_keras.utils.get_custom_objects().update({
-    "Similarity>MultiSimilarityLoss": MultiSimilarityLoss,
-    "MultiSimilarityLoss": MultiSimilarityLoss,
-    "MetricEmbedding": MetricEmbedding,
-    "SimilarityModel": SimilarityModel,
-})
-
-# COMMAND ----------
-
-model_uri = f"models:/{model_name}/10"
+model_uri = f"models:/{model_name}/{latest_version}"
 print(f"Loading model from: {model_uri}")
 loaded_model = mlflow.pyfunc.load_model(model_uri)
 
@@ -101,9 +92,6 @@ display(predictions)
 # MAGIC ## Section B — Query Model Serving Endpoint
 
 # COMMAND ----------
-
-import requests
-import json
 
 workspace_url = (
     dbutils.notebook.entry_point
@@ -139,9 +127,6 @@ print(json.dumps(response.json(), indent=2))
 # MAGIC Load the input image and all 5 recommended images from the Volume PNGs.
 
 # COMMAND ----------
-
-from matplotlib import pyplot as plt
-from PIL import Image
 
 # Get recommended IDs from local prediction
 recommended_ids = predictions["recommended_image_id"].tolist()

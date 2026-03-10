@@ -15,12 +15,20 @@ resources:
             notebook_path: ./01_data_preparation.py
             source: WORKSPACE
 
-        - task_key: model_training_and_deployment
+        - task_key: feature_table_setup
           depends_on:
             - task_key: data_preparation
           existing_cluster_id: "0309-174733-hzoid440"
           notebook_task:
-            notebook_path: ./02_model_training_and_deployment.py
+            notebook_path: ./02_feature_table_setup.py
+            source: WORKSPACE
+
+        - task_key: model_training_and_deployment
+          depends_on:
+            - task_key: feature_table_setup
+          existing_cluster_id: "0309-174733-hzoid440"
+          notebook_task:
+            notebook_path: ./03_model_training_and_deployment.py
             source: WORKSPACE
 
         - task_key: test_inference
@@ -28,7 +36,7 @@ resources:
             - task_key: model_training_and_deployment
           existing_cluster_id: "0309-174733-hzoid440"
           notebook_task:
-            notebook_path: ./03_test_inference.py
+            notebook_path: ./04_test_inference.py
             source: WORKSPACE
 
 targets:
