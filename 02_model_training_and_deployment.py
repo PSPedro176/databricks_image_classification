@@ -48,8 +48,6 @@ from tensorflow_similarity.layers import MetricEmbedding
 from tensorflow_similarity.losses import MultiSimilarityLoss
 from tensorflow_similarity.models import SimilarityModel
 from tensorflow_similarity.samplers import MultiShotMemorySampler
-from tensorflow_similarity.samplers import select_examples
-from tensorflow_similarity.visualization import viz_neigbors_imgs
 from matplotlib import pyplot as plt
 
 # COMMAND ----------
@@ -84,16 +82,13 @@ print(f"Model name: {model_name}")
 
 # COMMAND ----------
 
-train = (
-    spark.table(f"{catalog}.{schema}.fmnist_train_data")
-    .drop("image_id")
-    .toPandas().values
-)
-test = (
-    spark.table(f"{catalog}.{schema}.fmnist_test_data")
-    .drop("image_id")
-    .toPandas().values
-)
+train_pdf = spark.table(f"{catalog}.{schema}.fmnist_train_data").toPandas()
+test_pdf = spark.table(f"{catalog}.{schema}.fmnist_test_data").toPandas()
+
+# train keeps image_id (col 0), label (col 1), pixels (cols 2+)
+train = train_pdf.values
+# test drops image_id — only used for validation, not indexing
+test = test_pdf.drop(columns=["image_id"]).values
 
 # COMMAND ----------
 
@@ -107,16 +102,22 @@ def get_dataset(
     test: np.ndarray,
     rank: int = 0,
     size: int = 1,
-) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
-    """Reshape and partition image data for training."""
+):
+    """Reshape and partition image data for training.
+
+    train has columns: image_id, label, pixel_0..pixel_783
+    test has columns: label, pixel_0..pixel_783 (no image_id)
+    """
     np.random.shuffle(train)
     np.random.shuffle(test)
 
-    x_train = train[:, 1:].reshape(-1, 28, 28)
-    y_train = train[:, 0].astype(np.int32)
+    id_train = train[:, 0].astype(np.int64)
+    x_train = train[:, 2:].reshape(-1, 28, 28)
+    y_train = train[:, 1].astype(np.int32)
     x_test = test[:, 1:].reshape(-1, 28, 28)
     y_test = test[:, 0].astype(np.int32)
 
+    id_train = id_train[rank::size]
     x_train = x_train[rank::size]
     y_train = y_train[rank::size]
     x_test = x_test[rank::size]
@@ -124,7 +125,7 @@ def get_dataset(
 
     x_train = x_train.astype("float32") / 255.0
     x_test = x_test.astype("float32") / 255.0
-    return (x_train, y_train), (x_test, y_test)
+    return (x_train, y_train, id_train), (x_test, y_test)
 
 # COMMAND ----------
 
@@ -144,6 +145,18 @@ def get_model() -> SimilarityModel:
     x = layers.Flatten()(x)
     outputs = MetricEmbedding(256)(x)
     return SimilarityModel(inputs, outputs)
+
+# COMMAND ----------
+
+def select_examples_with_ids(x, y, ids, classes, n_per_class):
+    """Like select_examples but also tracks image_ids."""
+    x_out, y_out, id_out = [], [], []
+    for cls in classes:
+        indices = np.where(y == cls)[0][:n_per_class]
+        x_out.append(x[indices])
+        y_out.append(y[indices])
+        id_out.append(ids[indices])
+    return np.concatenate(x_out), np.concatenate(y_out), np.concatenate(id_out)
 
 # COMMAND ----------
 
@@ -168,7 +181,7 @@ def train_model(
 
     mlflow.tensorflow.autolog()
 
-    (x_train, y_train), (x_test, y_test) = get_dataset(train, test)
+    (x_train, y_train, _), (x_test, y_test) = get_dataset(train, test)
     classes = [2, 3, 1, 7, 9, 6, 8, 5, 0, 4]
     num_classes_ = 6
     class_per_batch = num_classes_
@@ -204,7 +217,7 @@ model = train_model(train, test, learning_rate=0.001)
 
 # COMMAND ----------
 
-(x_train, y_train), (x_test, y_test) = get_dataset(train, test)
+(x_train, y_train, id_train), (x_test, y_test) = get_dataset(train, test)
 classes = [2, 3, 1, 7, 9, 6, 8, 5, 0, 4]
 num_classes = 7
 classes_per_batch = num_classes
@@ -238,9 +251,9 @@ tfsim_model.summary()
 
 # COMMAND ----------
 
-x_index, y_index = select_examples(x_train, y_train, classes, 20)
+x_index, y_index, id_index = select_examples_with_ids(x_train, y_train, id_train, classes, 20)
 tfsim_model.reset_index()
-tfsim_model.index(x_index, y_index, data=x_index)
+tfsim_model.index(x_index, y_index, data=id_index)
 
 # COMMAND ----------
 
@@ -267,15 +280,28 @@ label
 
 # COMMAND ----------
 
+from tensorflow_similarity.samplers import select_examples
 x_display, y_display = select_examples(x_test, y_test, classes, 1)
 
-nns = np.array(tfsim_model.lookup(x_display, k=5))
+nns = tfsim_model.lookup(x_display, k=5)
+
+# Build pixel lookup from train_pdf for visualization
+_all_ids = train_pdf["image_id"].values.astype(np.int64)
+_all_px = train_pdf.drop(columns=["image_id", "label"]).values.reshape(-1, 28, 28).astype(np.uint8)
+_id_to_px = dict(zip(_all_ids.tolist(), _all_px))
 
 for idx in np.argsort(y_display):
-    viz_neigbors_imgs(
-        x_display[idx], y_display[idx], nns[idx],
-        fig_size=(16, 2), cmap="Greys",
-    )
+    fig, axes = plt.subplots(1, 6, figsize=(16, 2))
+    axes[0].imshow(x_display[idx], cmap="Greys")
+    axes[0].set_title(f"Query (label={y_display[idx]})")
+    axes[0].axis("off")
+    for i in range(5):
+        rec_id = int(nns[idx][i].data)
+        axes[i + 1].imshow(_id_to_px[rec_id], cmap="Greys")
+        axes[i + 1].set_title(f"id={rec_id} d={nns[idx][i].distance:.3f}")
+        axes[i + 1].axis("off")
+    plt.tight_layout()
+    plt.show()
 
 # COMMAND ----------
 
@@ -293,17 +319,20 @@ tfsim_model.save(tfsim_path)
 
 # COMMAND ----------
 
-artifacts = {"tfsim_model": tfsim_path}
+# Save ID-to-pixel lookup for the serving wrapper
+all_ids = train_pdf["image_id"].values.astype(np.int64)
+all_pixels = train_pdf.drop(columns=["image_id", "label"]).values.reshape(-1, 28, 28).astype(np.uint8)
+id_to_pixels_path = "/databricks/driver/models/id_to_pixels.npz"
+np.savez_compressed(id_to_pixels_path, image_ids=all_ids, pixels=all_pixels)
+
+artifacts = {"tfsim_model": tfsim_path, "id_to_pixels": id_to_pixels_path}
 
 # COMMAND ----------
 
 class TfsimWrapper(mlflow.pyfunc.PythonModel):
-    """Pyfunc wrapper that accepts a base64-encoded image and returns
-    the 5 nearest-neighbour images as hex-encoded byte strings."""
+    """Pyfunc wrapper: accepts an image_id, returns 5 recommended image_ids."""
 
-    def load_context(
-        self, context: mlflow.pyfunc.PythonModelContext
-    ) -> None:
+    def load_context(self, context):
         import os
         os.environ["TF_USE_LEGACY_KERAS"] = "1"
         import tf_keras
@@ -321,25 +350,19 @@ class TfsimWrapper(mlflow.pyfunc.PythonModel):
         )
         self.tfsim_model.load_index(context.artifacts["tfsim_model"])
 
-    def predict(
-        self,
-        context: mlflow.pyfunc.PythonModelContext,
-        model_input: pd.DataFrame,
-    ) -> pd.DataFrame:
-        from PIL import Image
-        import base64
-        import io
+        # Load ID-to-pixel mapping
+        data = np.load(context.artifacts["id_to_pixels"])
+        self.id_to_pixels = dict(zip(data["image_ids"].tolist(), data["pixels"]))
 
-        raw = model_input["input"][0].encode()
-        image = np.array(
-            Image.open(io.BytesIO(base64.b64decode(raw)))
-        )
-        image_reshaped = image.reshape(-1, 28, 28) / 255.0
-        images = np.array(self.tfsim_model.lookup(image_reshaped, k=5))
-        image_dict = {
-            i: images[0][i].data.tostring().hex() for i in range(5)
-        }
-        return pd.DataFrame.from_dict(image_dict, orient="index")
+    def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
+        image_id = int(model_input["image_id"].iloc[0])
+        pixels = self.id_to_pixels[image_id]  # (28, 28) uint8
+        image = pixels.astype("float32") / 255.0
+        image_reshaped = image.reshape(1, 28, 28)
+
+        results = self.tfsim_model.lookup(image_reshaped, k=5)
+        recommended_ids = [int(results[0][i].data) for i in range(5)]
+        return pd.DataFrame({"recommended_image_id": recommended_ids})
 
 # COMMAND ----------
 
@@ -366,7 +389,6 @@ conda_env = {
                 f"tensorflow_cpu=={tf.__version__}",
                 f"cloudpickle=={cloudpickle.__version__}",
                 "tf-keras",
-                "Pillow",
                 "protobuf==3.20.3",
             ],
         },
@@ -393,30 +415,12 @@ mlflow.pyfunc.save_model(
 
 # COMMAND ----------
 
-img = (
-    "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAAAAABXZoBIAAACN0lEQVR4nF3S"
-    "z2vaYBgH8DdKNypDZYO2hxWnVDGiESMxIUoStGKCMWgwEpVEtKIyxR848Qet"
-    "1FEHPRShp0FPu4wNdtoOg3Wn3Xvb/7Npq0Z93hBe3g/PA3m/AUCrkG/xrlkA"
-    "tKjlIQR086359ejhz93v+wcMfr7RMVf9MV8dpKnuz7vk6WQ2Fl9t2GGqd95t"
-    "dduicqoOzwqN/hWxxv1gnPZ5vAjK8HyE8FEwglG2lVqJYEgQRUlMyUI5+fFv"
-    "OJvA1q0kwpbYVEVMJVg+o0TlYorHGMMSE0ikwIfnYzEy6EcJNJgs47HV3Cjl"
-    "m7QtVpfD5nScwLDHySs0Y1yiy2L78cWBIH6MwQM46ie+dgJh8slO/n0yz+4L"
-    "MstyUZrj43L1O28djp9QHxOOPv9631EFlqE4qV6pfSuH8JdLPHa8UUdxNR4O"
-    "00GKkXIZF2w52t+4wjJBu+0exGGHvUhEr53rFhk0qzLqQ2GnFyNSkgnSr2K"
-    "BFoudvsso+WwmW8mfN4xgHdncAESqMSrCEAQpcErRAOk2MwMMQwSCATJEhDx"
-    "kZE8L+xHVNIOSbjcM4yhV3wOaLUq47lebhayUrTfqt6YthABeyFXOykVVzsqc"
-    "bAa6LeTSASZAzm8W9WOJgy0EoPchX8uXJFFQ8uXLwx3sTCeXF9Pm29ZgMOiZ"
-    "gF6bOX9ihVa9NO7k6oqqJJ5BO50Nnk4nJYKLRviG4fFP1qp/O51dXYza18Pu"
-    "zc2LnU/R2zHBTcJev81mNS7tP1M4itBUw7AYAAAAAElFTkSuQmCC"
-)
-
-data = {"input": [img]}
-sample_image = pd.DataFrame.from_dict(data)
+sample_input = pd.DataFrame({"image_id": [42]})
 
 # COMMAND ----------
 
 loaded_model = mlflow.pyfunc.load_model(mlflow_pyfunc_model_path)
-test_predictions = loaded_model.predict(sample_image)
+test_predictions = loaded_model.predict(sample_input)
 print(test_predictions)
 
 # COMMAND ----------
@@ -428,7 +432,7 @@ print(test_predictions)
 
 from mlflow.models.signature import infer_signature
 
-signature = infer_signature(sample_image, loaded_model.predict(sample_image))
+signature = infer_signature(sample_input, loaded_model.predict(sample_input))
 
 # COMMAND ----------
 
@@ -523,7 +527,7 @@ print(
 # MAGIC ### Test payload example
 # MAGIC
 # MAGIC ```json
-# MAGIC [{"input": "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAAAAABXZoBIAAACN0lE..."}]
+# MAGIC [{"image_id": 42}]
 # MAGIC ```
 
 # COMMAND ----------

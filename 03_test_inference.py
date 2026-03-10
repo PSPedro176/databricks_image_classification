@@ -18,41 +18,28 @@ os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 # COMMAND ----------
 
+import numpy as np
 import pandas as pd
 import mlflow
 
 mlflow.set_registry_uri("databricks-uc")
 
-model_name = "image_rec_classic_catalog.image_recommendation.image_recommender"
+catalog = "image_rec_classic_catalog"
+schema = "image_recommendation"
+model_name = f"{catalog}.{schema}.image_recommender"
 serving_endpoint_name = "image-recommender"
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Sample Image
+# MAGIC ## Sample Image ID
 # MAGIC
-# MAGIC Base64-encoded 28x28 Fashion MNIST image (a coat).
+# MAGIC We pass an integer `image_id` corresponding to a training image (0–59,999).
 
 # COMMAND ----------
 
-sample_b64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAAAAABXZoBIAAACN0lEQVR4nF3S"
-    "z2vaYBgH8DdKNypDZYO2hxWnVDGiESMxIUoStGKCMWgwEpVEtKIyxR848Qet"
-    "1FEHPRShp0FPu4wNdtoOg3Wn3Xvb/7Npq0Z93hBe3g/PA3m/AUCrkG/xrlkA"
-    "tKjlIQR086359ejhz93v+wcMfr7RMVf9MV8dpKnuz7vk6WQ2Fl9t2GGqd95t"
-    "dduicqoOzwqN/hWxxv1gnPZ5vAjK8HyE8FEwglG2lVqJYEgQRUlMyUI5+fFv"
-    "OJvA1q0kwpbYVEVMJVg+o0TlYorHGMMSE0ikwIfnYzEy6EcJNJgs47HV3Cjl"
-    "m7QtVpfD5nScwLDHySs0Y1yiy2L78cWBIH6MwQM46ie+dgJh8slO/n0yz+4L"
-    "MstyUZrj43L1O28djp9QHxOOPv9631EFlqE4qV6pfSuH8JdLPHa8UUdxNR4O"
-    "00GKkXIZF2w52t+4wjJBu+0exGGHvUhEr53rFhk0qzLqQ2GnFyNSkgnSr2K"
-    "BFoudvsso+WwmW8mfN4xgHdncAESqMSrCEAQpcErRAOk2MwMMQwSCATJEhDx"
-    "kZE8L+xHVNIOSbjcM4yhV3wOaLUq47lebhayUrTfqt6YthABeyFXOykVVzsqc"
-    "bAa6LeTSASZAzm8W9WOJgy0EoPchX8uXJFFQ8uXLwx3sTCeXF9Pm29ZgMOiZ"
-    "gF6bOX9ihVa9NO7k6oqqJJ5BO50Nnk4nJYKLRviG4fFP1qp/O51dXYza18Pu"
-    "zc2LnU/R2zHBTcJev81mNS7tP1M4itBUw7AYAAAAAElFTkSuQmCC"
-)
-
-sample_input = pd.DataFrame({"input": [sample_b64]})
+sample_image_id = 42
+sample_input = pd.DataFrame({"image_id": [sample_image_id]})
 
 # COMMAND ----------
 
@@ -61,16 +48,14 @@ sample_input = pd.DataFrame({"input": [sample_b64]})
 
 # COMMAND ----------
 
-import base64
-from io import BytesIO
-from PIL import Image
 from matplotlib import pyplot as plt
+from PIL import Image
 
-input_img = Image.open(BytesIO(base64.b64decode(sample_b64)))
+input_img = Image.open(f"/Volumes/{catalog}/{schema}/data/images/train/{sample_image_id}.png")
 
 plt.figure(figsize=(3, 3))
 plt.imshow(input_img, cmap="Greys")
-plt.title("Input image (coat)")
+plt.title(f"Input image (id={sample_image_id})")
 plt.axis("off")
 plt.show()
 
@@ -100,14 +85,14 @@ tf_keras.utils.get_custom_objects().update({
 
 # COMMAND ----------
 
-model_uri = f"models:/{model_name}/8"
+model_uri = f"models:/{model_name}/10"
 print(f"Loading model from: {model_uri}")
 loaded_model = mlflow.pyfunc.load_model(model_uri)
 
 # COMMAND ----------
 
 predictions = loaded_model.predict(sample_input)
-print("Predictions (5 nearest-neighbour images as hex):")
+print("Predictions (5 recommended image IDs):")
 display(predictions)
 
 # COMMAND ----------
@@ -139,7 +124,7 @@ headers = {
     "Content-Type": "application/json",
 }
 
-payload = {"dataframe_records": [{"input": sample_b64}]}
+payload = {"dataframe_records": [{"image_id": sample_image_id}]}
 
 response = requests.post(endpoint_url, headers=headers, json=payload)
 
@@ -151,19 +136,31 @@ print(json.dumps(response.json(), indent=2))
 # MAGIC %md
 # MAGIC ## Visualize Results
 # MAGIC
-# MAGIC Decode one of the nearest-neighbour hex images back to a viewable format.
+# MAGIC Load the input image and all 5 recommended images from the Volume PNGs.
 
 # COMMAND ----------
 
-import numpy as np
 from matplotlib import pyplot as plt
+from PIL import Image
 
-# Use the local prediction result
-hex_img = predictions.iloc[0, 0]
-img_array = np.frombuffer(bytes.fromhex(hex_img), dtype=np.float32).reshape(28, 28)
+# Get recommended IDs from local prediction
+recommended_ids = predictions["recommended_image_id"].tolist()
 
-plt.figure(figsize=(3, 3))
-plt.imshow(img_array, cmap="Greys")
-plt.title("Nearest neighbour #1")
-plt.axis("off")
+fig, axes = plt.subplots(1, 6, figsize=(18, 3))
+
+# Input image
+input_img = Image.open(f"/Volumes/{catalog}/{schema}/data/images/train/{sample_image_id}.png")
+axes[0].imshow(input_img, cmap="Greys")
+axes[0].set_title(f"Input\nid={sample_image_id}")
+axes[0].axis("off")
+
+# Recommended images
+for i, rec_id in enumerate(recommended_ids):
+    rec_img = Image.open(f"/Volumes/{catalog}/{schema}/data/images/train/{rec_id}.png")
+    axes[i + 1].imshow(rec_img, cmap="Greys")
+    axes[i + 1].set_title(f"Rec #{i+1}\nid={rec_id}")
+    axes[i + 1].axis("off")
+
+plt.suptitle("Image Recommendations", fontsize=14)
+plt.tight_layout()
 plt.show()
