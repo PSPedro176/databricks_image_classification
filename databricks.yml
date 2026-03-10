@@ -15,17 +15,17 @@ resources:
             notebook_path: ./01_data_preparation.py
             source: WORKSPACE
 
-        - task_key: feature_table_setup
+        - task_key: vector_search_setup
           depends_on:
             - task_key: data_preparation
           existing_cluster_id: "0309-174733-hzoid440"
           notebook_task:
-            notebook_path: ./02_feature_table_setup.py
+            notebook_path: ./02_vector_search_setup.py
             source: WORKSPACE
 
         - task_key: model_training_and_deployment
           depends_on:
-            - task_key: feature_table_setup
+            - task_key: vector_search_setup
           existing_cluster_id: "0309-174733-hzoid440"
           notebook_task:
             notebook_path: ./03_model_training_and_deployment.py

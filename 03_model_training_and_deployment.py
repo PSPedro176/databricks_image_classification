@@ -4,9 +4,8 @@
 # MAGIC
 # MAGIC This notebook reads the Fashion MNIST Delta tables created in **01_data_preparation**,
 # MAGIC trains a similarity model on a single GPU, computes embeddings for all training
-# MAGIC images, populates the feature table (created in **02_feature_table_setup**),
-# MAGIC syncs the Vector Search index, registers the model to Unity Catalog, and deploys
-# MAGIC a Model Serving endpoint.
+# MAGIC images, writes them to a Delta table, syncs the Vector Search index,
+# MAGIC registers the model to Unity Catalog, and deploys a Model Serving endpoint.
 
 # COMMAND ----------
 
@@ -15,7 +14,7 @@
 # MAGIC
 # MAGIC 1. **Setup** — Install libraries, imports, configure Unity Catalog
 # MAGIC 2. **Single-GPU Training** — Train a similarity model on one GPU
-# MAGIC 3. **Embeddings** — Compute & write embeddings to feature table, sync VS index
+# MAGIC 3. **Embeddings** — Compute & write embeddings to Delta table, sync VS index
 # MAGIC 4. **Deployment** — Register to UC and create a Model Serving endpoint
 
 # COMMAND ----------
@@ -72,13 +71,13 @@ schema = "image_recommendation"
 volume = "data"
 volume_path = f"/Volumes/{catalog}/{schema}/{volume}"
 model_name = f"{catalog}.{schema}.image_recommender"
-feature_table_name = f"{catalog}.{schema}.image_embeddings"
+embeddings_table_name = f"{catalog}.{schema}.image_embeddings"
 
 print(f"Using catalog: {catalog}")
 print(f"Using schema: {catalog}.{schema}")
 print(f"Volume path: {volume_path}")
 print(f"Model name: {model_name}")
-print(f"Feature table: {feature_table_name}")
+print(f"Embeddings table: {embeddings_table_name}")
 
 # COMMAND ----------
 
@@ -316,7 +315,7 @@ import shutil
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Compute Embeddings & Populate Feature Table
+# MAGIC ## Compute Embeddings & Write to Delta Table
 
 # COMMAND ----------
 
@@ -338,8 +337,8 @@ emb_schema = StructType([
     StructField("embedding", ArrayType(FloatType()), False),
 ])
 embeddings_df = spark.createDataFrame(rows, schema=emb_schema)
-embeddings_df.write.mode("overwrite").saveAsTable(feature_table_name)
-print(f"Wrote {len(rows)} embeddings to {feature_table_name}")
+embeddings_df.write.mode("overwrite").saveAsTable(embeddings_table_name)
+print(f"Wrote {len(rows)} embeddings to {embeddings_table_name}")
 
 # COMMAND ----------
 
@@ -465,7 +464,7 @@ print(test_predictions)
 
 from mlflow.models.signature import infer_signature
 
-# Signature uses image_id only — Feature Serving adds the embedding
+# Signature uses image_id only — Vector Search resolves the embedding at serving time
 sig_input = pd.DataFrame({"image_id": [sample_id]})
 signature = infer_signature(sig_input, test_predictions)
 
