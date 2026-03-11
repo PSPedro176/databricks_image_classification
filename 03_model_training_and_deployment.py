@@ -19,7 +19,11 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install tensorflow_similarity protobuf==3.20.3 tf-keras
+# MAGIC %pip install tensorflow_similarity protobuf==3.20.3 tf-keras databricks-vectorsearch
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -306,15 +310,6 @@ for idx in np.argsort(y_display):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## MLflow Pyfunc Wrapper for Deployment
-
-# COMMAND ----------
-
-import shutil
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## Compute Embeddings & Write to Delta Table
 
 # COMMAND ----------
@@ -356,6 +351,11 @@ vs_index = vs_client.get_index(
 )
 vs_index.sync()
 print("Vector Search index sync triggered.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## MLflow Pyfunc Wrapper for Deployment
 
 # COMMAND ----------
 
@@ -426,6 +426,7 @@ conda_env = {
 
 # COMMAND ----------
 
+import shutil
 wrapper = TfsimWrapper()
 wrapper.vs_endpoint_name = "image-recommender-vs"
 wrapper.vs_index_name = f"{catalog}.{schema}.image_embeddings_index"
@@ -463,6 +464,7 @@ print(test_predictions)
 # COMMAND ----------
 
 from mlflow.models.signature import infer_signature
+from mlflow.models.resources import DatabricksVectorSearchIndex
 
 # Signature uses image_id only — Vector Search resolves the embedding at serving time
 sig_input = pd.DataFrame({"image_id": [sample_id]})
@@ -486,6 +488,11 @@ with mlflow.start_run() as run:
         conda_env=conda_env,
         signature=signature,
         input_example=sig_input.to_dict(orient="list"),
+        resources=[
+            DatabricksVectorSearchIndex(
+                index_name=f"{catalog}.{schema}.image_embeddings_index",
+            ),
+        ],
     )
 
     model_version = mlflow.register_model(
