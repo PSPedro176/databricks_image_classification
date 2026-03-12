@@ -1,32 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Image Recommendation System — Model Training & Deployment
-# MAGIC
-# MAGIC This notebook reads the Fashion MNIST Delta tables created in **01_data_preparation**,
-# MAGIC trains a similarity model on a single GPU, computes embeddings for all training
-# MAGIC images, writes them to a Delta table, syncs the Vector Search index,
-# MAGIC registers the model to Unity Catalog, and deploys a Model Serving endpoint.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Table of Contents
-# MAGIC
-# MAGIC 1. **Setup** — Install libraries, imports, configure Unity Catalog
-# MAGIC 2. **Single-GPU Training** — Train a similarity model on one GPU
-# MAGIC 3. **Embeddings** — Compute & write embeddings to Delta table, sync VS index
-# MAGIC 4. **Deployment** — Register to UC and create a Model Serving endpoint
 
 # COMMAND ----------
 
 # MAGIC %pip install tensorflow_similarity protobuf==3.20.3 tf-keras databricks-vectorsearch
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
-dbutils.library.restartPython()
-
-# COMMAND ----------
-
+# DBTITLE 1,Packages
 import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
@@ -112,7 +95,6 @@ def get_dataset(
     size: int = 1,
 ):
     """Reshape and partition image data for training.
-
     train has columns: image_id, label, pixel_0..pixel_783
     test has columns: label, pixel_0..pixel_783 (no image_id)
     """
@@ -168,15 +150,6 @@ def select_examples_with_ids(x, y, ids, classes, n_per_class):
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Single-GPU Training
-
-# COMMAND ----------
-
-num_classes = 10
-
-# COMMAND ----------
-
 def train_model(
     train: np.ndarray,
     test: np.ndarray,
@@ -215,9 +188,7 @@ def train_model(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Train the Final Model
-# MAGIC
-# MAGIC Train the final model with tuned parameters and build an index for querying.
+# MAGIC ## Train Model
 
 # COMMAND ----------
 
@@ -251,21 +222,18 @@ tfsim_model.summary()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Build an Index
+# MAGIC ## Build an Index and visualize images
 
 # COMMAND ----------
 
+# DBTITLE 1,Index Build
 x_index, y_index, id_index = select_examples_with_ids(x_train, y_train, id_train, classes, 20)
 tfsim_model.reset_index()
 tfsim_model.index(x_index, y_index, data=id_index)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Visualize a sample image
-
-# COMMAND ----------
-
+# DBTITLE 1,Sample image
 sample_image = x_index[0]
 sample_image = sample_image.reshape(1, sample_image.shape[0], sample_image.shape[1])
 plt.imshow(sample_image[0], interpolation="nearest")
@@ -273,17 +241,14 @@ plt.show()
 
 # COMMAND ----------
 
+# DBTITLE 1,Label of sample image
 label = y_index[0]
 label
 # 4 is a Coat — see https://github.com/zalandoresearch/fashion-mnist
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Query nearest neighbours
-
-# COMMAND ----------
-
+# DBTITLE 1,Query nearest neighbours
 from tensorflow_similarity.samplers import select_examples
 x_display, y_display = select_examples(x_test, y_test, classes, 1)
 
@@ -310,15 +275,17 @@ for idx in np.argsort(y_display):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Compute Embeddings & Write to Delta Table
+# MAGIC ## Compute Embeddings
 
 # COMMAND ----------
 
+# DBTITLE 1,Inference
 embeddings = tfsim_model.predict(x_train)  # shape: (N, 256)
 print(f"Computed {embeddings.shape[0]} embeddings of dim {embeddings.shape[1]}")
 
 # COMMAND ----------
 
+# DBTITLE 1,Save to Delta Table
 from pyspark.sql.types import (
     StructType, StructField, IntegerType, ArrayType, FloatType,
 )
@@ -337,11 +304,7 @@ print(f"Wrote {len(rows)} embeddings to {embeddings_table_name}")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Trigger Vector Search index sync
-
-# COMMAND ----------
-
+# DBTITLE 1,Trigger Vector Search index sync
 from databricks.vector_search.client import VectorSearchClient
 
 vs_client = VectorSearchClient()
@@ -359,6 +322,7 @@ print("Vector Search index sync triggered.")
 
 # COMMAND ----------
 
+# DBTITLE 1,Class definition
 class TfsimWrapper(mlflow.pyfunc.PythonModel):
     """Pyfunc wrapper: looks up embedding via Vector Search,
     then finds 5 nearest neighbors."""
@@ -397,21 +361,11 @@ class TfsimWrapper(mlflow.pyfunc.PythonModel):
 
 # COMMAND ----------
 
-PYTHON_VERSION = (
-    f"{version_info.major}.{version_info.minor}.{version_info.micro}"
-)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Conda environment for the MLflow model
-
-# COMMAND ----------
-
+# DBTITLE 1,Conda environment for the model
 conda_env = {
     "channels": ["defaults"],
     "dependencies": [
-        f"python={PYTHON_VERSION}",
+        f"python={version_info.major}.{version_info.minor}.{version_info.micro}",
         "pip",
         {
             "pip": [
@@ -426,57 +380,23 @@ conda_env = {
 
 # COMMAND ----------
 
-import shutil
-wrapper = TfsimWrapper()
-wrapper.vs_endpoint_name = "image-recommender-vs"
-wrapper.vs_index_name = f"{catalog}.{schema}.image_embeddings_index"
-
-mlflow_pyfunc_model_path = "/databricks/driver/models/tfsim_mlflow.pth"
-if os.path.exists(mlflow_pyfunc_model_path):
-    shutil.rmtree(mlflow_pyfunc_model_path)
-mlflow.pyfunc.save_model(
-    path=mlflow_pyfunc_model_path,
-    python_model=wrapper,
-    conda_env=conda_env,
-)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Test the pyfunc model locally
-
-# COMMAND ----------
-
-sample_id = 42
-sample_input = pd.DataFrame({"image_id": [sample_id]})
-
-# COMMAND ----------
-
-loaded_model = mlflow.pyfunc.load_model(mlflow_pyfunc_model_path)
-test_predictions = loaded_model.predict(sample_input)
-print(test_predictions)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Infer model signature
-
-# COMMAND ----------
-
-from mlflow.models.signature import infer_signature
-from mlflow.models.resources import DatabricksVectorSearchIndex
-
-# Signature uses image_id only — Vector Search resolves the embedding at serving time
-sig_input = pd.DataFrame({"image_id": [sample_id]})
-signature = infer_signature(sig_input, test_predictions)
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## Register Model to Unity Catalog
 
 # COMMAND ----------
 
+# DBTITLE 1,Infer model signature
+from mlflow.models.signature import infer_signature
+from mlflow.models.resources import DatabricksVectorSearchIndex
+
+# Signature uses image_id only — Vector Search resolves the embedding at serving time
+sample_id = 42
+sig_input = pd.DataFrame({"image_id": [sample_id]})
+signature = infer_signature(sig_input, test_predictions)
+
+# COMMAND ----------
+
+# DBTITLE 1,MLflow logging and UC registration
 wrapper = TfsimWrapper()
 wrapper.vs_endpoint_name = "image-recommender-vs"
 wrapper.vs_index_name = f"{catalog}.{schema}.image_embeddings_index"
@@ -564,23 +484,3 @@ print(
     f"Endpoint URL: {workspace_url}/serving-endpoints/"
     f"{serving_endpoint_name}/invocations"
 )
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Test payload example
-# MAGIC
-# MAGIC ```json
-# MAGIC [{"image_id": 42}]
-# MAGIC ```
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC &copy; 2022 Databricks, Inc. All rights reserved. The source in this notebook is provided subject to the [Databricks License](https://databricks.com/db-license-source). All included or referenced third party libraries are subject to the licenses set forth below.
-# MAGIC
-# MAGIC | library / data source | description | license | source |
-# MAGIC |---|---|---|---|
-# MAGIC | tensorflow | package | Apache 2.0 | https://github.com/tensorflow/tensorflow/blob/master/LICENSE |
-# MAGIC | fashion-mnist | dataset | MIT | https://github.com/zalandoresearch/fashion-mnist/blob/master/LICENSE |

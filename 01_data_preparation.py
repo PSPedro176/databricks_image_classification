@@ -8,10 +8,20 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Table of Contents
+# MAGIC ### Class labels
 # MAGIC
-# MAGIC 1. **Setup** — Imports, configure Unity Catalog
-# MAGIC 2. **Data Preparation** — Download Fashion MNIST, convert to Delta tables
+# MAGIC | Label | Description |
+# MAGIC |-------|-------------|
+# MAGIC | 0     | T-shirt/top |
+# MAGIC | 1     | Trouser     |
+# MAGIC | 2     | Pullover    |
+# MAGIC | 3     | Dress       |
+# MAGIC | 4     | Coat        |
+# MAGIC | 5     | Sandal      |
+# MAGIC | 6     | Shirt       |
+# MAGIC | 7     | Sneaker     |
+# MAGIC | 8     | Bag         |
+# MAGIC | 9     | Ankle boot  |
 
 # COMMAND ----------
 
@@ -23,7 +33,6 @@ from PIL import Image
 
 # COMMAND ----------
 
-# DBTITLE 1,Configure Unity Catalog and Volumes
 catalog = "image_rec_classic_catalog"
 schema = "image_recommendation"
 volume = "data"
@@ -60,8 +69,6 @@ print(f"Volume path: {volume_path}")
 
 # MAGIC %md
 # MAGIC ### Convert raw files to Delta tables
-# MAGIC
-# MAGIC Adapted from <https://pjreddie.com/projects/mnist-in-csv/>.
 
 # COMMAND ----------
 
@@ -110,24 +117,6 @@ for dataset in datasets:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Class labels
-# MAGIC
-# MAGIC | Label | Description |
-# MAGIC |-------|-------------|
-# MAGIC | 0     | T-shirt/top |
-# MAGIC | 1     | Trouser     |
-# MAGIC | 2     | Pullover    |
-# MAGIC | 3     | Dress       |
-# MAGIC | 4     | Coat        |
-# MAGIC | 5     | Sandal      |
-# MAGIC | 6     | Shirt       |
-# MAGIC | 7     | Sneaker     |
-# MAGIC | 8     | Bag         |
-# MAGIC | 9     | Ankle boot  |
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ### Verification — read tables back and print shapes
 
 # COMMAND ----------
@@ -143,14 +132,3 @@ result = subprocess.run(["ls", f"{volume_path}/images/train/"], capture_output=T
 print(f"Train images saved: {len(result.stdout.strip().split())} files")
 result = subprocess.run(["ls", f"{volume_path}/images/test/"], capture_output=True, text=True)
 print(f"Test images saved:  {len(result.stdout.strip().split())} files")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC &copy; 2022 Databricks, Inc. All rights reserved. The source in this notebook is provided subject to the [Databricks License](https://databricks.com/db-license-source). All included or referenced third party libraries are subject to the licenses set forth below.
-# MAGIC
-# MAGIC | library / data source | description | license | source |
-# MAGIC |---|---|---|---|
-# MAGIC | tensorflow | package | Apache 2.0 | https://github.com/tensorflow/tensorflow/blob/master/LICENSE |
-# MAGIC | fashion-mnist | dataset | MIT | https://github.com/zalandoresearch/fashion-mnist/blob/master/LICENSE |

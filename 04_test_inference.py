@@ -1,18 +1,11 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Test Inference — Image Recommender
-# MAGIC
-# MAGIC This notebook verifies the trained model works via two methods:
-# MAGIC 1. **Local inference** — Load the pyfunc model from Unity Catalog via MLflow
-# MAGIC 2. **Serving endpoint** — Query the Model Serving REST API
 
 # COMMAND ----------
 
 # MAGIC %pip install databricks-vectorsearch
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -42,22 +35,17 @@ serving_endpoint_name = "image-recommender"
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Sample Image ID
-# MAGIC
-# MAGIC We pass an integer `image_id` corresponding to a training image (0–59,999).
+# MAGIC ### Input image
 
 # COMMAND ----------
 
+# DBTITLE 1,Sample Image ID
 sample_image_id = 42
 sample_input = pd.DataFrame({"image_id": [sample_image_id]})
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Display the input image
-
-# COMMAND ----------
-
+# DBTITLE 1,Display
 input_img = Image.open(f"/Volumes/{catalog}/{schema}/data/images/train/{sample_image_id}.png")
 
 plt.figure(figsize=(3, 3))
@@ -82,7 +70,7 @@ latest_version = max(
 
 model_uri = f"models:/{model_name}/{latest_version}"
 print(f"Loading model from: {model_uri}")
-loaded_model = mlflow.pyfunc.load_model(model_uri)
+loaded_model = mlflow.pyfunc.load_model(model_uri) # You can also load a model that was only logged to mlflow, but not registered to UC!
 
 # COMMAND ----------
 
@@ -127,8 +115,6 @@ print(json.dumps(response.json(), indent=2))
 
 # MAGIC %md
 # MAGIC ## Visualize Results
-# MAGIC
-# MAGIC Load the input image and all 5 recommended images from the Volume PNGs.
 
 # COMMAND ----------
 

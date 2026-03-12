@@ -1,25 +1,11 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Vector Search Setup
-# MAGIC
-# MAGIC This notebook creates the infrastructure for similarity search:
-# MAGIC 1. **Delta table** for embeddings in Unity Catalog (source of truth for VS)
-# MAGIC 2. **Vector Search endpoint & Delta Sync index** for ANN similarity search
-# MAGIC
-# MAGIC Run this **before** notebook 03 (model training), which populates the table.
 
 # COMMAND ----------
 
 # MAGIC %pip install databricks-vectorsearch
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Configuration
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -109,11 +95,3 @@ except Exception as e:
         print(f"VS index '{vs_index_name}' already exists.")
     else:
         raise
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Done
-# MAGIC
-# MAGIC Infrastructure is ready. Run **03_model_training_and_deployment** next to
-# MAGIC train the model, compute embeddings, sync the VS index, and deploy.
